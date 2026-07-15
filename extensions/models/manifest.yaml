@@ -1,0 +1,18 @@
+manifestVersion: 1
+name: "@mgreten/code-review-panel"
+version: "2026.07.15.1"
+description: >
+  Run a panel of independent reviewer personas over one body of code and return
+  unified, actionable findings — the transpose of rubric grading, built for
+  review-and-fix workflows.
+
+repository: https://github.com/meagerfindings/swamp-code-review-panel
+
+models:
+  - code_review_panel.ts
+
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+
+platforms: []
