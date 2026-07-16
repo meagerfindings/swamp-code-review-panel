@@ -244,7 +244,7 @@ type MethodContext = {
  */
 export const model = {
   type: "@mgreten/code-review-panel",
-  version: "2026.07.15.1",
+  version: "2026.07.16.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     panelReview: {
