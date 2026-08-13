@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@mgreten/code-review-panel"
-version: "2026.07.31.1"
+version: "2026.08.13.1"
 description: >
   Run a panel of independent reviewer personas over one body of code and return
   unified, actionable findings — the transpose of rubric grading, built for

@@ -113,6 +113,7 @@ commits.
 | `target`   | string   | yes      | Label for what is under review, e.g. `PR #123 final state`.                    |
 | `context`  | string   | yes      | The code context every persona reviews — a diff, file dump, or summary.        |
 | `personas` | string[] | yes      | Reviewer personas: slash commands resolved by cli-agent, or role instructions. |
+| `focusArea` | string  | no       | Free-text directive layered onto EVERY persona's prompt in addition to its normal role, e.g. `"pay extra attention to extensibility"` or `"explain how this relates to PR #123"`. Never replaces a persona's own instructions. |
 | `provider` | string   | no       | Override the CLI provider for this run.                                        |
 | `model`    | string   | no       | Override the CLI model for this run.                                           |
 | `nowIso`   | string   | no       | ISO timestamp to stamp the result with (for deterministic tests).              |

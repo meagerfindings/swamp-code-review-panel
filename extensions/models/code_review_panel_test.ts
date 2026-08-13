@@ -40,6 +40,29 @@ Deno.test("buildPersonaPrompt: instructs empty-findings shape", () => {
   assertStringIncludes(p, '{"findings": []}');
 });
 
+Deno.test("buildPersonaPrompt: omits the focus block when focusArea is absent", () => {
+  const p = buildPersonaPrompt("query-performance", "t", "c");
+  assertEquals(p.includes("ADDITIONAL FOCUS FROM THE REQUESTER"), false);
+});
+
+Deno.test("buildPersonaPrompt: omits the focus block when focusArea is blank", () => {
+  const p = buildPersonaPrompt("query-performance", "t", "c", "   ");
+  assertEquals(p.includes("ADDITIONAL FOCUS FROM THE REQUESTER"), false);
+});
+
+Deno.test("buildPersonaPrompt: layers focusArea onto the persona's own prompt, not in place of it", () => {
+  const p = buildPersonaPrompt(
+    "query-performance",
+    "t",
+    "c",
+    "pay extra attention to extensibility",
+  );
+  assertStringIncludes(p, 'Act as the "query-performance" code reviewer.');
+  assertStringIncludes(p, "ADDITIONAL FOCUS FROM THE REQUESTER");
+  assertStringIncludes(p, "pay extra attention to extensibility");
+  assertStringIncludes(p, "single fenced JSON");
+});
+
 // --- Provider catalog read --------------------------------------------------
 //
 // The catalog is the fleet's single switch point for {provider, model}. These

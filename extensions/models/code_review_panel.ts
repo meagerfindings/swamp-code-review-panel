@@ -82,6 +82,8 @@ const PanelReviewSchema = z.object({
   /** Free-form label for what was reviewed (e.g. "PR #24375 final state"). */
   target: z.string(),
   personas: z.array(z.string()),
+  /** The `focusArea` this run was given, if any — for a caller's "reviewed with focus: …" display. */
+  focusArea: z.string().optional(),
   findings: z.array(FindingSchema),
   /** Personas that failed to run (agent error/timeout), for transparency. */
   skipped: z.array(z.object({ persona: z.string(), reason: z.string() })),
@@ -333,23 +335,35 @@ export async function resolveDispatch(
  * command (starts with "/"), it is passed through so cli-agent resolves it from
  * its commands dir; otherwise it is treated as a role instruction. Either way
  * the shared context and the required JSON output contract are appended.
+ *
+ * `focusArea`, when given, is an ADDITIONAL directive layered onto every
+ * persona's prompt — not a replacement for the persona's own role or the
+ * standard findings contract. It lets a caller steer a whole panel run
+ * ("pay extra attention to extensibility", "explain how this relates to
+ * PR #123") without having to hand-author a one-off persona.
  */
 export function buildPersonaPrompt(
   persona: string,
   target: string,
   context: string,
+  focusArea?: string,
 ): string {
   const isCommand = persona.trim().startsWith("/");
   const roleLine = isCommand
     ? `Run the ${persona} review.`
     : `Act as the "${persona}" code reviewer.`;
 
+  const trimmedFocus = (focusArea ?? "").trim();
+  const focusBlock = trimmedFocus.length > 0
+    ? `\nADDITIONAL FOCUS FROM THE REQUESTER (apply this on top of your normal review, do not drop your other findings for it):\n${trimmedFocus}\n`
+    : "";
+
   return `${roleLine}
 
 You are reviewing: ${target}
 Review ONLY the code in the context below. Read surrounding files in the working tree to confirm
 findings, but do not review code outside the changes described here.
-
+${focusBlock}
 --- CONTEXT ---
 ${context}
 --- END CONTEXT ---
@@ -406,7 +420,7 @@ type MethodContext = {
  */
 export const model = {
   type: "@mgreten/code-review-panel",
-  version: "2026.07.31.1",
+  version: "2026.08.13.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     panelReview: {
@@ -434,6 +448,11 @@ export const model = {
           "Reviewer personas: slash commands (e.g. '/ai-slop-check') resolved by cli-agent, " +
             "or role names used as instructions.",
         ),
+        focusArea: z.string().optional().describe(
+          "Optional free-text directive layered onto EVERY persona's prompt in addition to " +
+            "its normal role (e.g. 'pay extra attention to extensibility' or 'explain how " +
+            "this relates to PR #123'). Never replaces a persona's own instructions.",
+        ),
         provider: z.string().optional().describe(
           "Override CLI provider for this run",
         ),
@@ -449,6 +468,7 @@ export const model = {
           target: string;
           context: string;
           personas: string[];
+          focusArea?: string;
           provider?: string;
           model?: string;
           nowIso?: string;
@@ -466,6 +486,7 @@ export const model = {
             persona,
             args.target,
             args.context,
+            args.focusArea,
           );
 
           // Provider precedence, strictest first:
@@ -594,6 +615,9 @@ export const model = {
           repoPath: g.repoPath,
           target: args.target,
           personas: args.personas,
+          ...(args.focusArea?.trim()
+            ? { focusArea: args.focusArea.trim() }
+            : {}),
           findings,
           skipped,
           severityCounts,
