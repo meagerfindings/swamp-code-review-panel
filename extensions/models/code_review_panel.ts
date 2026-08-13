@@ -30,9 +30,33 @@ const GlobalArgsSchema = z.object({
   swampRepoDir: z.string().default(Deno.cwd()),
   /** Working directory the reviewer agents run in (the code under review). */
   repoPath: z.string().default(Deno.cwd()),
-  /** Default CLI provider + model for review passes. */
+  /**
+   * Default CLI provider + model for review passes. These are the FALLBACK
+   * only — the provider catalog (see `providerCatalogModel`) is consulted
+   * first, and an explicit per-call `provider`/`model` method arg beats both.
+   */
   reviewProvider: z.string().default("claude"),
   reviewModelId: z.string().default("sonnet"),
+  /**
+   * Name of the `@mgreten/agent-provider-catalog` instance holding the fleet's
+   * provider/model table. Reading `{provider, model}` from the catalog rather
+   * than hardcoding it here makes a fleet-wide provider migration (e.g. moving
+   * off Anthropic onto codex) a single catalog edit instead of a sweep across
+   * every consumer's globalArgs.
+   */
+  providerCatalogModel: z.string().default("provider-catalog").describe(
+    "Name of the @mgreten/agent-provider-catalog instance holding the fleet's provider/model table. Reading {provider, model} from the catalog instead of hardcoding it makes a fleet-wide provider migration one catalog edit rather than a per-consumer sweep.",
+  ),
+  /**
+   * Whether to read `{provider, model}` from `providerCatalogModel`. On by
+   * default — a review panel's findings carry no cross-run comparability
+   * requirement, so it should follow the fleet. The read is fail-open: a
+   * missing, broken, or misconfigured catalog falls back to `reviewProvider` /
+   * `reviewModelId` rather than taking a review down.
+   */
+  useProviderCatalog: z.boolean().default(true).describe(
+    "Read {provider, model} from providerCatalogModel instead of reviewProvider/reviewModelId. ON by default so this model follows the fleet. An explicit per-call provider/model method arg still wins over the catalog. Fail-open: a missing or broken catalog falls back to the literals.",
+  ),
   /** Per-persona wall timeout (ms). */
   reviewTimeoutMs: z.number().default(300_000),
 });
@@ -183,6 +207,128 @@ async function invokeCliAgent(
 }
 
 /**
+ * Scan a `resolveAgentDispatch` payload's entries for the first whose
+ * attributes carry BOTH `provider` and `model`.
+ *
+ * Deliberately a scan rather than `entries[0]`: the catalog may grow its return
+ * envelope (an audit artifact, a fallback-chain handle), and indexing the first
+ * slot would silently start reading the wrong resource the day it does.
+ */
+export function extractDispatch(
+  entries: unknown,
+): { provider: string; model: string } | null {
+  if (!Array.isArray(entries)) return null;
+  for (const entry of entries) {
+    // Two shapes carry the payload depending on transport: a method-run --json
+    // envelope nests it under `attributes`, while `swamp data get --json` nests
+    // it under `content`. Accept either so one reader serves both paths.
+    const e = entry as { attributes?: unknown; content?: unknown } | null;
+    const attrs = e?.attributes ?? e?.content;
+    if (!attrs || typeof attrs !== "object") continue;
+    const { provider, model } = attrs as Record<string, unknown>;
+    if (
+      typeof provider === "string" && provider.length > 0 &&
+      typeof model === "string" && model.length > 0
+    ) {
+      return { provider, model };
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the effective `{provider, model}` for one work item + persona role from
+ * the `@mgreten/agent-provider-catalog` instance named by
+ * `providerCatalogModel`.
+ *
+ * WHY: the catalog is the single switch point for the fleet's provider choice —
+ * with every consumer reading it, moving off one provider onto another is one
+ * catalog edit rather than an edit to every model's globalArgs.
+ *
+ * FAIL-OPEN by construction: catalog disabled, missing instance, `runModel`
+ * throw, `ok:false`, unparseable envelope, or absent provider/model fields all
+ * return null, and the caller keeps whatever it already had. A broken catalog
+ * must never be able to take a review down.
+ *
+ * Transport mirrors `invokeCliAgent`: `context.runModel` in-process when the CLI
+ * offers it, otherwise the same `swamp model method run … --json` shellout
+ * scoped to `swampRepoDir`.
+ */
+export async function resolveDispatch(
+  g: z.infer<typeof GlobalArgsSchema>,
+  context: MethodContext | undefined,
+  workItem: string,
+  role: string,
+): Promise<{ provider: string; model: string } | null> {
+  if (!g.useProviderCatalog) return null;
+
+  const args = {
+    workItem,
+    role,
+    instanceName: g.cliAgentModel,
+    attempt: 1,
+  };
+
+  try {
+    if (context && typeof context.runModel === "function") {
+      const run = await context.runModel({
+        definition: g.providerCatalogModel,
+        method: "resolveAgentDispatch",
+        arguments: args,
+      });
+      // A hard failure is authoritative: stay on the fallback values.
+      if (!run.ok) return null;
+      // DataHandle is metadata-only — name/specName/dataId/version, NO
+      // `attributes`. (The type is loose enough that reading .attributes
+      // compiles and then silently yields undefined at runtime; an earlier
+      // version did exactly that and so never resolved a provider at all.)
+      // Read the resource back BY NAME rather than re-running
+      // resolveAgentDispatch through the shellout, which would execute the
+      // catalog method a second time on every single review.
+      const handle = run.resources[0];
+      if (!handle) return null;
+      const readBack = await runSwampCmd(
+        ["data", "get", g.providerCatalogModel, handle.name, "--json"],
+        // swampRepoDir, NOT repoPath: repoPath is the REVIEWED git repo, while
+        // the catalog's artifact lives in the swamp repo's datastore.
+        g.swampRepoDir,
+      );
+      if (!readBack.success) return null;
+      return extractDispatch([JSON.parse(readBack.stdout)]);
+    }
+
+    const inputFile = await Deno.makeTempFile({ suffix: ".json" });
+    try {
+      await Deno.writeTextFile(inputFile, JSON.stringify(args));
+      const result = await runSwampCmd(
+        [
+          "model",
+          "method",
+          "run",
+          g.providerCatalogModel,
+          "resolveAgentDispatch",
+          "--input-file",
+          inputFile,
+          "--json",
+        ],
+        g.swampRepoDir,
+      );
+      if (!result.success) return null;
+      const data = JSON.parse(result.stdout);
+      if (data.error || data.status === "failed") return null;
+      return extractDispatch(data.dataArtifacts ?? data.dataHandles);
+    } finally {
+      try {
+        await Deno.remove(inputFile);
+      } catch { /* cleanup */ }
+    }
+  } catch {
+    // Fail-open: any throw leaves the caller on its existing provider/model.
+    return null;
+  }
+}
+
+/**
  * Build the per-persona review prompt. When `persona` looks like a slash
  * command (starts with "/"), it is passed through so cli-agent resolves it from
  * its commands dir; otherwise it is treated as a role instruction. Either way
@@ -235,6 +381,22 @@ type MethodContext = {
     instanceName: string,
     data: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
+  /**
+   * Run a method on another same-repo model in-process. Optional — older swamp
+   * CLIs don't provide it, so `resolveDispatch` null-checks before use and
+   * falls back to the `swamp model method run` shellout.
+   */
+  runModel?: (options: {
+    definition: string;
+    method: string;
+    arguments?: Record<string, unknown>;
+  }) => Promise<
+    | {
+      ok: true;
+      resources: Array<{ name: string } & Record<string, unknown>>;
+    }
+    | { ok: false; error: { message: string } }
+  >;
 };
 
 /**
@@ -244,7 +406,7 @@ type MethodContext = {
  */
 export const model = {
   type: "@mgreten/code-review-panel",
-  version: "2026.07.16.1",
+  version: "2026.07.31.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     panelReview: {
@@ -294,8 +456,6 @@ export const model = {
         context: MethodContext,
       ) => {
         const g = context.globalArgs;
-        const provider = args.provider ?? g.reviewProvider;
-        const modelId = args.model ?? g.reviewModelId;
 
         const findings: z.infer<typeof FindingSchema>[] = [];
         const skipped: Array<{ persona: string; reason: string }> = [];
@@ -306,6 +466,42 @@ export const model = {
             persona,
             args.target,
             args.context,
+          );
+
+          // Provider precedence, strictest first:
+          //   explicit method arg > provider catalog > globalArg default.
+          // The catalog is asked per persona because the persona name IS the
+          // role — the catalog's roleMap folds e.g. "correctness"/"security"/
+          // "performance" onto its abstract reviewer role. Skip the read
+          // entirely when the caller pinned both values for this run: an
+          // explicit override must never be second-guessed by the fleet.
+          const needsCatalog = !args.provider || !args.model;
+          const dispatch = needsCatalog
+            ? await resolveDispatch(g, context, args.target, persona)
+            : null;
+          const provider = args.provider ?? dispatch?.provider ??
+            g.reviewProvider;
+          const modelId = args.model ?? dispatch?.model ?? g.reviewModelId;
+          // Always log WHICH provider/model this persona actually ran on, and
+          // WHY it was chosen. Without this, "the catalog moved us to codex",
+          // "the caller pinned gemini", and "the catalog never answered so we
+          // stayed on claude" are indistinguishable in the log — and because
+          // the catalog read is fail-open, that last case is silent by
+          // construction.
+          context.logger.info(
+            "Persona {persona} on {provider}/{model} (source: {source})",
+            {
+              persona,
+              provider,
+              model: modelId,
+              source: !needsCatalog
+                ? "explicit method args"
+                : dispatch
+                ? "provider catalog"
+                : g.useProviderCatalog
+                ? "globalArg default (catalog unavailable)"
+                : "globalArg default (catalog off)",
+            },
           );
           let agentResult = await invokeCliAgent(
             g.cliAgentModel,
