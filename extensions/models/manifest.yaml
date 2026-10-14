@@ -1,6 +1,7 @@
 manifestVersion: 1
 name: "@mgreten/code-review-panel"
-version: "2026.08.13.1"
+version: "2026.10.14.1"
+license: MIT
 description: >
   Run a panel of independent reviewer personas over one body of code and return
   unified, actionable findings — the transpose of rubric grading, built for
